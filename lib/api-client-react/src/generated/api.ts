@@ -272,6 +272,95 @@ export const useIdentifyAudioWindow = <
 };
 
 /**
+ * @summary Extract normalized WAV audio from uploaded media
+ */
+export const getExtractAudioUrl = () => {
+  return `/api/audio/extract`;
+};
+
+export const extractAudio = async (
+  extractAudioBody: Blob,
+  options?: RequestInit,
+): Promise<Blob> => {
+  return customFetch<Blob>(getExtractAudioUrl(), {
+    ...options,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...options?.headers,
+    },
+    body: JSON.stringify(extractAudioBody),
+  });
+};
+
+export const getExtractAudioMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof extractAudio>>,
+    TError,
+    { data: BodyType<Blob> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof extractAudio>>,
+  TError,
+  { data: BodyType<Blob> },
+  TContext
+> => {
+  const mutationKey = ["extractAudio"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof extractAudio>>,
+    { data: BodyType<Blob> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return extractAudio(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ExtractAudioMutationResult = NonNullable<
+  Awaited<ReturnType<typeof extractAudio>>
+>;
+export type ExtractAudioMutationBody = BodyType<Blob>;
+export type ExtractAudioMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Extract normalized WAV audio from uploaded media
+ */
+export const useExtractAudio = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof extractAudio>>,
+    TError,
+    { data: BodyType<Blob> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof extractAudio>>,
+  TError,
+  { data: BodyType<Blob> },
+  TContext
+> => {
+  return useMutation(getExtractAudioMutationOptions(options));
+};
+
+/**
  * @summary List copyright-safe replacement tracks
  */
 export const getListReplacementTracksUrl = () => {

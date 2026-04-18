@@ -53,10 +53,36 @@ export async function getFFmpeg() {
 }
 
 export async function convertToWav(file: File, onProgress: (msg: string) => void): Promise<Blob> {
-  onProgress("Loading ffmpeg engine...");
+  onProgress("Uploading media for server-side audio extraction...");
+  try {
+    const response = await fetch("/api/audio/extract", {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-filename": encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Server returned HTTP ${response.status}`);
+    }
+
+    onProgress("Audio extracted successfully...");
+    return await response.blob();
+  } catch (serverError) {
+    if (typeof SharedArrayBuffer === "undefined" || !(window as any).crossOriginIsolated) {
+      throw serverError instanceof Error
+        ? serverError
+        : new Error("Server-side audio extraction failed.");
+    }
+  }
+
+  onProgress("Loading browser ffmpeg engine...");
   const { ff, fetchFile } = await getFFmpeg();
-  
-  onProgress("Converting to WAV...");
+
+  onProgress("Converting to WAV in browser...");
   const inputName = "input" + file.name.slice(file.name.lastIndexOf("."));
   ff.FS("writeFile", inputName, await fetchFile(file));
   

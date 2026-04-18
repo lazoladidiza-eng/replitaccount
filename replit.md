@@ -18,8 +18,8 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 ## Artifacts
 
-- **ClipCleaner** (`artifacts/clipcleaner`, preview `/`): React/Vite prototype for YouTube copyright pre-checks. Supports media upload, browser audio extraction/normalization, 10-second window scanning, risk display, and replacement-track suggestions.
-- **API Server** (`artifacts/api-server`, preview `/api`): Express backend. Includes health routes plus ClipCleaner ACRCloud proxy endpoints.
+- **ClipCleaner** (`artifacts/clipcleaner`, preview `/`): React/Vite prototype for YouTube copyright pre-checks. Supports media upload, server-side audio extraction/normalization, 10-second window scanning, risk display, and replacement-track suggestions.
+- **API Server** (`artifacts/api-server`, preview `/api`): Express backend. Includes health routes, ClipCleaner ACRCloud proxy endpoints, and server-side ffmpeg audio extraction.
 - **Canvas** (`artifacts/mockup-sandbox`, preview `/__mockup`): Design/mockup sandbox.
 
 ## ClipCleaner API Notes
@@ -29,6 +29,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
   - `ACR_ACCESS_SECRET`
   - Optional: `ACR_HOST` (defaults to `identify-eu-west-1.acrcloud.com`)
 - The browser never receives ACRCloud secrets. It sends base64-encoded mono WAV snippets to `/api/acr/identify`; the backend signs and forwards each request to ACRCloud.
+- Media files are posted to `/api/audio/extract` as raw binary. The backend uses system `ffmpeg` to extract mono 16kHz WAV audio, avoiding browser `SharedArrayBuffer` / ffmpeg.wasm limitations in preview iframes and mobile browsers.
 - If credentials are missing, `/api/acr/status` returns a clear not-configured state and the frontend still allows testing upload/extraction flow.
 
 ## Key Commands
