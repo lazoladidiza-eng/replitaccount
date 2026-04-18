@@ -5,17 +5,51 @@ export const isVideo = (f: File) =>
   f.type.startsWith("video/") || 
   [".mp4", ".mov", ".avi", ".mkv", ".webm"].some(e => f.name.toLowerCase().endsWith(e));
 
-// @ts-ignore
-let ffmpegInstance: any = null;
+let ffmpegInstance: { ff: any; fetchFile: (file: File) => Promise<Uint8Array> } | null = null;
+let ffmpegLoader: Promise<{ ff: any; fetchFile: (file: File) => Promise<Uint8Array> }> | null = null;
 
 export async function getFFmpeg() {
   if (ffmpegInstance) return ffmpegInstance;
-  // @ts-ignore
-  const { createFFmpeg, fetchFile } = await import("https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js");
-  const ff = createFFmpeg({ log: false });
-  await ff.load();
-  ffmpegInstance = { ff, fetchFile };
-  return ffmpegInstance;
+  if (ffmpegLoader) return ffmpegLoader;
+
+  ffmpegLoader = new Promise((resolve, reject) => {
+    const existing = (window as any).FFmpeg;
+    if (existing?.createFFmpeg && existing?.fetchFile) {
+      const ff = existing.createFFmpeg({
+        log: false,
+        corePath: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js",
+      });
+      ff.load().then(() => {
+        ffmpegInstance = { ff, fetchFile: existing.fetchFile };
+        resolve(ffmpegInstance);
+      }).catch(reject);
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js";
+    script.async = true;
+    script.onload = () => {
+      const loaded = (window as any).FFmpeg;
+      if (!loaded?.createFFmpeg || !loaded?.fetchFile) {
+        reject(new Error("ffmpeg loaded, but the browser API was unavailable."));
+        return;
+      }
+
+      const ff = loaded.createFFmpeg({
+        log: false,
+        corePath: "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js",
+      });
+      ff.load().then(() => {
+        ffmpegInstance = { ff, fetchFile: loaded.fetchFile };
+        resolve(ffmpegInstance);
+      }).catch(reject);
+    };
+    script.onerror = () => reject(new Error("Could not load the ffmpeg engine."));
+    document.head.appendChild(script);
+  });
+
+  return ffmpegLoader;
 }
 
 export async function convertToWav(file: File, onProgress: (msg: string) => void): Promise<Blob> {
@@ -40,7 +74,7 @@ export async function convertToWav(file: File, onProgress: (msg: string) => void
   try { ff.FS("unlink", inputName); } catch {}
   try { ff.FS("unlink", "output.wav"); } catch {}
   
-  return new Blob([data.buffer], { type: "audio/wav" });
+  return new Blob([data.slice().buffer], { type: "audio/wav" });
 }
 
 export function encodeWAV(samples: Float32Array, sampleRate: number): ArrayBuffer {
