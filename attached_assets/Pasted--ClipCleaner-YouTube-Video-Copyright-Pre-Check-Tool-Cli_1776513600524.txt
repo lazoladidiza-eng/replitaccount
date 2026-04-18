@@ -1,0 +1,19 @@
+# ClipCleaner: YouTube Video Copyright Pre-Check Tool
+
+ClipCleaner is an early-stage web app designed to help YouTube creators reduce copyright risks by scanning their videos before upload. Users can upload full video files (e.g., MP4, MOV), and the app extracts the audio, normalizes it, and sends it to ACRCloud’s music fingerprinting API for copyright detection.
+
+## Core Features
+1. **Video Upload**: Users upload entire video files (MP4, MOV).
+2. **Audio Extraction**: The app extracts the audio from the video in-browser using a carefully set up ffmpeg workflow.
+3. **Audio Normalization**: All audio is converted to a mono, 16kHz WAV format to ensure consistency and accurate scanning.
+4. **Copyright Scan**: ACRCloud's API receives 10-second audio windows, detecting potential copyright matches.
+5. **Progress Tracking**: Users see real-time scan progress, with flagged sections displayed if copyright risks are detected.
+6. **Safe Replacements**: For flagged segments, the app offers free, copyright-safe music alternatives.
+
+## Goals and Approach
+We are just starting out and don’t need a full-fledged production app yet. Instead, we aim to build a lightweight, reusable prototype that we can test quickly. As part of this process, we will examine the current code, identify weaknesses, and iteratively improve the architecture. We will also verify that the API integration (ACRCloud) is robust and that we handle all edge cases, especially on mobile platforms. By keeping the app modular and testable, we can evolve it step by step toward a scalable solution.
+
+## API Considerations
+The app relies on ACRCloud’s fingerprinting API for music identification. We will ensure the API calls are stable, handle errors gracefully, and provide meaningful feedback in the UI.
+
+In short, ClipCleaner will be a reusable test app that we iterate on, starting with browser-based audio extraction, moving to a robust backend solution as we scale, ensuring a reliable, mobile-friendly, and efficient copyright pre-check workflow.

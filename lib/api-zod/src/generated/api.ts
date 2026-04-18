@@ -14,3 +14,63 @@ import * as zod from "zod";
 export const HealthCheckResponse = zod.object({
   status: zod.string(),
 });
+
+/**
+ * @summary Check ACRCloud configuration
+ */
+export const GetAcrStatusResponse = zod.object({
+  configured: zod.boolean(),
+  host: zod.string().optional(),
+  message: zod.string(),
+});
+
+/**
+ * @summary Identify one audio window with ACRCloud
+ */
+
+export const identifyAudioWindowBodyOffsetSecondsMin = 0;
+
+export const identifyAudioWindowBodyDurationSecondsMax = 15;
+
+export const IdentifyAudioWindowBody = zod.object({
+  sampleBase64: zod
+    .string()
+    .min(1)
+    .describe("Base64-encoded mono WAV audio sample."),
+  windowIndex: zod.number().min(1),
+  offsetSeconds: zod.number().min(identifyAudioWindowBodyOffsetSecondsMin),
+  durationSeconds: zod
+    .number()
+    .min(1)
+    .max(identifyAudioWindowBodyDurationSecondsMax),
+});
+
+export const IdentifyAudioWindowResponse = zod.object({
+  windowIndex: zod.number(),
+  offsetSeconds: zod.number(),
+  durationSeconds: zod.number(),
+  matched: zod.boolean(),
+  statusCode: zod.number(),
+  statusMessage: zod.string(),
+  title: zod.string().optional(),
+  artist: zod.string().optional(),
+  album: zod.string().optional(),
+  label: zod.string().optional(),
+  score: zod.number().optional(),
+  acrId: zod.string().optional(),
+});
+
+/**
+ * @summary List copyright-safe replacement tracks
+ */
+export const ListReplacementTracksResponseItem = zod.object({
+  id: zod.string(),
+  title: zod.string(),
+  artist: zod.string(),
+  mood: zod.string(),
+  duration: zod.string(),
+  bestFor: zod.string(),
+});
+export const ListReplacementTracksResponse = zod.array(
+  ListReplacementTracksResponseItem,
+);

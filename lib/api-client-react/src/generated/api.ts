@@ -5,18 +5,28 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult,
 } from "@tanstack/react-query";
 
-import type { HealthStatus } from "./api.schemas";
+import type {
+  AcrIdentifyRequest,
+  AcrIdentifyResult,
+  AcrStatus,
+  ErrorResponse,
+  HealthStatus,
+  ReplacementTrack,
+} from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
-import type { ErrorType } from "../custom-fetch";
+import type { ErrorType, BodyType } from "../custom-fetch";
 
 type AwaitedInput<T> = PromiseLike<T> | T;
 
@@ -92,6 +102,242 @@ export function useHealthCheck<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getHealthCheckQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Check ACRCloud configuration
+ */
+export const getGetAcrStatusUrl = () => {
+  return `/api/acr/status`;
+};
+
+export const getAcrStatus = async (
+  options?: RequestInit,
+): Promise<AcrStatus> => {
+  return customFetch<AcrStatus>(getGetAcrStatusUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetAcrStatusQueryKey = () => {
+  return [`/api/acr/status`] as const;
+};
+
+export const getGetAcrStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getAcrStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getAcrStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetAcrStatusQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getAcrStatus>>> = ({
+    signal,
+  }) => getAcrStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getAcrStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetAcrStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getAcrStatus>>
+>;
+export type GetAcrStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Check ACRCloud configuration
+ */
+
+export function useGetAcrStatus<
+  TData = Awaited<ReturnType<typeof getAcrStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getAcrStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetAcrStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Identify one audio window with ACRCloud
+ */
+export const getIdentifyAudioWindowUrl = () => {
+  return `/api/acr/identify`;
+};
+
+export const identifyAudioWindow = async (
+  acrIdentifyRequest: AcrIdentifyRequest,
+  options?: RequestInit,
+): Promise<AcrIdentifyResult> => {
+  return customFetch<AcrIdentifyResult>(getIdentifyAudioWindowUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(acrIdentifyRequest),
+  });
+};
+
+export const getIdentifyAudioWindowMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof identifyAudioWindow>>,
+    TError,
+    { data: BodyType<AcrIdentifyRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof identifyAudioWindow>>,
+  TError,
+  { data: BodyType<AcrIdentifyRequest> },
+  TContext
+> => {
+  const mutationKey = ["identifyAudioWindow"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof identifyAudioWindow>>,
+    { data: BodyType<AcrIdentifyRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return identifyAudioWindow(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type IdentifyAudioWindowMutationResult = NonNullable<
+  Awaited<ReturnType<typeof identifyAudioWindow>>
+>;
+export type IdentifyAudioWindowMutationBody = BodyType<AcrIdentifyRequest>;
+export type IdentifyAudioWindowMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Identify one audio window with ACRCloud
+ */
+export const useIdentifyAudioWindow = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof identifyAudioWindow>>,
+    TError,
+    { data: BodyType<AcrIdentifyRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof identifyAudioWindow>>,
+  TError,
+  { data: BodyType<AcrIdentifyRequest> },
+  TContext
+> => {
+  return useMutation(getIdentifyAudioWindowMutationOptions(options));
+};
+
+/**
+ * @summary List copyright-safe replacement tracks
+ */
+export const getListReplacementTracksUrl = () => {
+  return `/api/replacement-tracks`;
+};
+
+export const listReplacementTracks = async (
+  options?: RequestInit,
+): Promise<ReplacementTrack[]> => {
+  return customFetch<ReplacementTrack[]>(getListReplacementTracksUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListReplacementTracksQueryKey = () => {
+  return [`/api/replacement-tracks`] as const;
+};
+
+export const getListReplacementTracksQueryOptions = <
+  TData = Awaited<ReturnType<typeof listReplacementTracks>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listReplacementTracks>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListReplacementTracksQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listReplacementTracks>>
+  > = ({ signal }) => listReplacementTracks({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listReplacementTracks>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListReplacementTracksQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listReplacementTracks>>
+>;
+export type ListReplacementTracksQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List copyright-safe replacement tracks
+ */
+
+export function useListReplacementTracks<
+  TData = Awaited<ReturnType<typeof listReplacementTracks>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listReplacementTracks>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListReplacementTracksQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

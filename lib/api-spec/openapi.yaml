@@ -1,6 +1,5 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
   description: API specification
@@ -10,6 +9,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: clipcleaner
+    description: ClipCleaner audio scan operations
 paths:
   /healthz:
     get:
@@ -24,6 +25,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /acr/status:
+    get:
+      operationId: getAcrStatus
+      tags: [clipcleaner]
+      summary: Check ACRCloud configuration
+      responses:
+        "200":
+          description: Current integration status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcrStatus"
+  /acr/identify:
+    post:
+      operationId: identifyAudioWindow
+      tags: [clipcleaner]
+      summary: Identify one audio window with ACRCloud
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcrIdentifyRequest"
+      responses:
+        "200":
+          description: Identification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcrIdentifyResult"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: ACRCloud is not configured or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /replacement-tracks:
+    get:
+      operationId: listReplacementTracks
+      tags: [clipcleaner]
+      summary: List copyright-safe replacement tracks
+      responses:
+        "200":
+          description: Replacement track library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReplacementTrack"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +90,102 @@ components:
           type: string
       required:
         - status
-
+    AcrStatus:
+      type: object
+      properties:
+        configured:
+          type: boolean
+        host:
+          type: string
+        message:
+          type: string
+      required:
+        - configured
+        - message
+    AcrIdentifyRequest:
+      type: object
+      properties:
+        sampleBase64:
+          type: string
+          minLength: 1
+          description: Base64-encoded mono WAV audio sample.
+        windowIndex:
+          type: integer
+          minimum: 1
+        offsetSeconds:
+          type: number
+          minimum: 0
+        durationSeconds:
+          type: number
+          minimum: 1
+          maximum: 15
+      required:
+        - sampleBase64
+        - windowIndex
+        - offsetSeconds
+        - durationSeconds
+    AcrIdentifyResult:
+      type: object
+      properties:
+        windowIndex:
+          type: integer
+        offsetSeconds:
+          type: number
+        durationSeconds:
+          type: number
+        matched:
+          type: boolean
+        statusCode:
+          type: integer
+        statusMessage:
+          type: string
+        title:
+          type: string
+        artist:
+          type: string
+        album:
+          type: string
+        label:
+          type: string
+        score:
+          type: number
+        acrId:
+          type: string
+      required:
+        - windowIndex
+        - offsetSeconds
+        - durationSeconds
+        - matched
+        - statusCode
+        - statusMessage
+    ReplacementTrack:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        artist:
+          type: string
+        mood:
+          type: string
+        duration:
+          type: string
+        bestFor:
+          type: string
+      required:
+        - id
+        - title
+        - artist
+        - mood
+        - duration
+        - bestFor
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        details:
+          type: string
+      required:
+        - error

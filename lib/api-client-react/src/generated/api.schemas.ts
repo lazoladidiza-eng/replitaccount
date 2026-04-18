@@ -8,3 +8,55 @@
 export interface HealthStatus {
   status: string;
 }
+
+export interface AcrStatus {
+  configured: boolean;
+  host?: string;
+  message: string;
+}
+
+export interface AcrIdentifyRequest {
+  /**
+   * Base64-encoded mono WAV audio sample.
+   * @minLength 1
+   */
+  sampleBase64: string;
+  /** @minimum 1 */
+  windowIndex: number;
+  /** @minimum 0 */
+  offsetSeconds: number;
+  /**
+   * @minimum 1
+   * @maximum 15
+   */
+  durationSeconds: number;
+}
+
+export interface AcrIdentifyResult {
+  windowIndex: number;
+  offsetSeconds: number;
+  durationSeconds: number;
+  matched: boolean;
+  statusCode: number;
+  statusMessage: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  label?: string;
+  score?: number;
+  acrId?: string;
+}
+
+export interface ReplacementTrack {
+  id: string;
+  title: string;
+  artist: string;
+  mood: string;
+  duration: string;
+  bestFor: string;
+}
+
+export interface ErrorResponse {
+  error: string;
+  details?: string;
+}
