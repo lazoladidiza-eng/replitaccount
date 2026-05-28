@@ -1,10 +1,18 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play } from "lucide-react";
+import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { SUPPORTED_EXTS, MAX_SIZE_MB, isVideo, convertToWav, extractSnippet } from "@/lib/audio";
+import {
+  SUPPORTED_EXTS,
+  MAX_SIZE_MB,
+  LARGE_FILE_THRESHOLD_MB,
+  canUseBrowserFFmpeg,
+  isVideo,
+  convertToWav,
+  extractSnippet,
+} from "@/lib/audio";
 import { useGetAcrStatus, useIdentifyAudioWindow, useListReplacementTracks } from "@workspace/api-client-react";
 import type { AcrIdentifyResult } from "@workspace/api-client-react";
 
@@ -16,6 +24,7 @@ const STEP = {
   SCANNING: "scanning",
   DONE: "done",
   ERROR: "error",
+  TOO_LARGE: "too_large",
 } as const;
 type Step = (typeof STEP)[keyof typeof STEP];
 
@@ -42,6 +51,7 @@ export default function Home() {
   const [totalWin, setTotalWin] = useState(0);
   const [results, setResults] = useState<AcrIdentifyResult[]>([]);
   const [scanWarnings, setScanWarnings] = useState<string[]>([]);
+  const [rejectedSizeMB, setRejectedSizeMB] = useState(0);
   const [dragOver, setDragOver] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -79,6 +89,7 @@ export default function Home() {
     setTotalWin(0);
     setResults([]);
     setScanWarnings([]);
+    setRejectedSizeMB(0);
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
   };
@@ -93,9 +104,9 @@ export default function Home() {
       setStep(STEP.ERROR);
       return;
     }
-    if (f.size > MAX_SIZE_MB * 1024 * 1024) {
-      setErrorMsg(`File too large (${(f.size / 1024 / 1024).toFixed(0)}MB). Maximum is ${MAX_SIZE_MB}MB.`);
-      setStep(STEP.ERROR);
+    if (f.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024) {
+      setRejectedSizeMB(f.size / 1024 / 1024);
+      setStep(STEP.TOO_LARGE);
       return;
     }
 
@@ -255,7 +266,10 @@ export default function Home() {
             </div>
             <div>
               <h3 className="text-lg font-medium text-white">Drop media file to scan</h3>
-              <p className="text-sm text-muted-foreground mt-1">Video or Audio, up to {MAX_SIZE_MB}MB</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                Video or Audio, up to {Math.round(MAX_SIZE_MB / 1024)}GB
+                {canUseBrowserFFmpeg() ? " — processed on your device" : ""}
+              </p>
             </div>
             <input 
               ref={inputRef} 
@@ -278,6 +292,47 @@ export default function Home() {
               </h3>
               <p className="text-sm text-muted-foreground">{statusMsg}</p>
             </div>
+          </Card>
+        )}
+
+        {/* TOO LARGE — show actionable guidance instead of a hard failure */}
+        {step === STEP.TOO_LARGE && (
+          <Card className="p-8 border-yellow-500/30 bg-yellow-500/5 flex flex-col gap-6" data-testid="too-large">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-full bg-yellow-500/10 flex items-center justify-center shrink-0">
+                <FileWarning className="w-6 h-6 text-yellow-500" />
+              </div>
+              <div>
+                <h3 className="text-lg font-medium text-yellow-500">File is too large to scan directly</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Your file is {rejectedSizeMB >= 1024
+                    ? `${(rejectedSizeMB / 1024).toFixed(1)} GB`
+                    : `${Math.round(rejectedSizeMB)} MB`}
+                  . The browser can't safely process anything over {Math.round(MAX_SIZE_MB / 1024)} GB.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h4 className="font-semibold text-white text-sm mb-2">Quick fix · Export audio only</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  In CapCut (or your editor), export the project as MP3 or M4A. The audio is typically
+                  under 200 MB even for a long video. Drop the audio file here instead.
+                </p>
+              </div>
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h4 className="font-semibold text-white text-sm mb-2">Or · Export a 1080p version</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Re-export your video at 1080p (instead of 4K). A 1-hour 1080p file is usually 1–2 GB
+                  and works in the browser directly.
+                </p>
+              </div>
+            </div>
+
+            <Button variant="outline" onClick={reset} data-testid="button-too-large-reset">
+              Try Another File
+            </Button>
           </Card>
         )}
 

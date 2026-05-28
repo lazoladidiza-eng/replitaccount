@@ -1,8 +1,29 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+
+// Required for the in-browser audio extractor (ffmpeg.wasm needs
+// SharedArrayBuffer, which the browser only exposes under cross-origin
+// isolation). Production hosting must also send these headers.
+const crossOriginIsolation = (): Plugin => ({
+  name: "cross-origin-isolation",
+  configureServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+      next();
+    });
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+      next();
+    });
+  },
+});
 
 const rawPort = process.env.PORT;
 
@@ -29,6 +50,7 @@ if (!basePath) {
 export default defineConfig({
   base: basePath,
   plugins: [
+    crossOriginIsolation(),
     react(),
     tailwindcss(),
     runtimeErrorOverlay(),
