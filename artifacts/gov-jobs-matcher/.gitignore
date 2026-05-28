@@ -1,0 +1,9 @@
+# Local CVs and downloaded circulars stay out of git
+fixtures/cvs/*
+!fixtures/cvs/.gitkeep
+fixtures/circulars/*
+!fixtures/circulars/.gitkeep
+
+# Generated reports
+out/*
+!out/.gitkeep
