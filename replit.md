@@ -21,6 +21,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **ClipCleaner** (`artifacts/clipcleaner`, preview `/`): React/Vite prototype for YouTube copyright pre-checks. Supports media upload, server-side audio extraction/normalization, 10-second window scanning, risk display, and replacement-track suggestions.
 - **API Server** (`artifacts/api-server`, preview `/api`): Express backend. Includes health routes, ClipCleaner ACRCloud proxy endpoints, and server-side ffmpeg audio extraction.
 - **Canvas** (`artifacts/mockup-sandbox`, preview `/__mockup`): Design/mockup sandbox.
+- **GPS Share** (`artifacts/gps-share-app`): Flutter MVP for consent-based live GPS sharing (Android-first, Firebase Auth + Firestore). Self-contained — invisible to pnpm. See `artifacts/gps-share-app/README.md` for setup.
 
 ## ClipCleaner API Notes
 
