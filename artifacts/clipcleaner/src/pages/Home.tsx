@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning } from "lucide-react";
+import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning, Copy, Check } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
@@ -52,7 +52,20 @@ export default function Home() {
   const [results, setResults] = useState<AcrIdentifyResult[]>([]);
   const [scanWarnings, setScanWarnings] = useState<string[]>([]);
   const [rejectedSizeMB, setRejectedSizeMB] = useState(0);
+  const [commandCopied, setCommandCopied] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+
+  const ffmpegCommand = "ffmpeg -i input.mp4 -vn -acodec libmp3lame -b:a 192k output.mp3";
+
+  const copyFfmpegCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(ffmpegCommand);
+      setCommandCopied(true);
+      setTimeout(() => setCommandCopied(false), 2000);
+    } catch {
+      // clipboard access can be blocked; user can still select-and-copy the visible text
+    }
+  };
 
   const inputRef = useRef<HTMLInputElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -90,6 +103,7 @@ export default function Home() {
     setResults([]);
     setScanWarnings([]);
     setRejectedSizeMB(0);
+    setCommandCopied(false);
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
   };
@@ -328,6 +342,42 @@ export default function Home() {
                   and works in the browser directly.
                 </p>
               </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+              <div>
+                <h4 className="font-semibold text-white text-sm">Power user · Extract audio with one command</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed mt-1">
+                  Paste this in your computer's Terminal (replace <code className="font-mono">input.mp4</code> with
+                  your file name). When it's done, drop the resulting <code className="font-mono">output.mp3</code> here.
+                </p>
+              </div>
+              <div className="flex items-stretch gap-2 rounded-md bg-secondary border border-border overflow-hidden">
+                <code className="flex-1 px-3 py-2 text-xs font-mono text-white overflow-x-auto whitespace-nowrap" data-testid="ffmpeg-command">
+                  {ffmpegCommand}
+                </code>
+                <button
+                  type="button"
+                  onClick={copyFfmpegCommand}
+                  className="shrink-0 px-3 flex items-center justify-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-white hover:bg-secondary/80 transition-colors border-l border-border"
+                  data-testid="button-copy-command"
+                >
+                  {commandCopied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{commandCopied ? "Copied" : "Copy"}</span>
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Don't have ffmpeg installed?{" "}
+                <a
+                  href="https://ffmpeg.org/download.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary hover:underline"
+                >
+                  Get it here
+                </a>{" "}
+                — free and works on Mac, Windows, and Linux.
+              </p>
             </div>
 
             <Button variant="outline" onClick={reset} data-testid="button-too-large-reset">
