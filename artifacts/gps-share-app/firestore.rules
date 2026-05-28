@@ -1,0 +1,78 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isAcceptedContactOf(ownerUid) {
+      return isSignedIn() && exists(
+        /databases/$(database)/documents/users/$(ownerUid)/contacts/$(request.auth.uid)
+      );
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAcceptedContactOf(uid);
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid);
+      allow delete: if isOwner(uid);
+
+      // Live position: only contacts and owner read; only owner writes.
+      match /live/{docId} {
+        allow read: if isOwner(uid) || isAcceptedContactOf(uid);
+        allow write: if isOwner(uid);
+      }
+
+      // History: owner-only.
+      match /history/{entryId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // Accepted contacts: owner-only management.
+      match /contacts/{contactUid} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // Incoming invites: owner reads + updates; anyone signed in can create
+      // an invite addressed to this user.
+      match /invitesIncoming/{inviteId} {
+        allow read, update, delete: if isOwner(uid);
+        allow create: if isSignedIn()
+          && request.resource.data.fromUid == request.auth.uid;
+      }
+
+      // Outgoing invites: owner-only.
+      match /invitesOutgoing/{inviteId} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // Email -> uid lookup for invite-by-email. Any signed-in user can read;
+    // owner-only writes (enforced by checking uid in the document equals the
+    // requester's uid).
+    match /userEmailIndex/{emailKey} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.uid == request.auth.uid;
+    }
+
+    // SOS alerts: sender creates, sender + named recipients read.
+    match /sosAlerts/{alertId} {
+      allow create: if isSignedIn()
+        && request.resource.data.fromUid == request.auth.uid;
+      allow read: if isSignedIn() && (
+        resource.data.fromUid == request.auth.uid ||
+        request.auth.uid in resource.data.notifiedContactUids
+      );
+      allow update, delete: if false;
+    }
+  }
+}
