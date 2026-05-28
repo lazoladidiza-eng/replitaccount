@@ -66,7 +66,14 @@ export async function convertToWav(file: File, onProgress: (msg: string) => void
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || `Server returned HTTP ${response.status}`);
+      let message = text;
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed.details || parsed.error || text;
+      } catch {
+        // not JSON — keep raw text
+      }
+      throw new Error(message || `Server returned HTTP ${response.status}`);
     }
 
     onProgress("Audio extracted successfully...");

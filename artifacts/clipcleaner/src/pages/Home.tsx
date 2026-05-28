@@ -6,16 +6,22 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SUPPORTED_EXTS, MAX_SIZE_MB, isVideo, convertToWav, extractSnippet } from "@/lib/audio";
 import { useGetAcrStatus, useIdentifyAudioWindow, useListReplacementTracks } from "@workspace/api-client-react";
+import type { AcrIdentifyResult } from "@workspace/api-client-react";
 
-const STEP = { 
-  IDLE: "idle", 
-  CONVERTING: "converting", 
-  LOADING: "loading", 
-  READY: "ready", 
-  SCANNING: "scanning", 
-  DONE: "done", 
-  ERROR: "error" 
-};
+const STEP = {
+  IDLE: "idle",
+  CONVERTING: "converting",
+  LOADING: "loading",
+  READY: "ready",
+  SCANNING: "scanning",
+  DONE: "done",
+  ERROR: "error",
+} as const;
+type Step = (typeof STEP)[keyof typeof STEP];
+
+const WINDOW_SECONDS = 30;
+const SNIPPET_SECONDS = 10;
+const HIGH_RISK_MATCH_COUNT = 3;
 
 function formatTime(seconds: number) {
   const mins = Math.floor(seconds / 60);
@@ -25,27 +31,44 @@ function formatTime(seconds: number) {
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [fileType, setFileType] = useState<"video" | "audio" | "">("");
+  const [fileType, setFileType] = useState<"video" | "audio" | null>(null);
   const [audioBuf, setAudioBuf] = useState<AudioBuffer | null>(null);
   const [duration, setDuration] = useState(0);
-  const [step, setStep] = useState(STEP.IDLE);
+  const [step, setStep] = useState<Step>(STEP.IDLE);
   const [statusMsg, setStatusMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [progress, setProgress] = useState(0);
   const [curWin, setCurWin] = useState(0);
   const [totalWin, setTotalWin] = useState(0);
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<AcrIdentifyResult[]>([]);
+  const [scanWarnings, setScanWarnings] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  
+
   const inputRef = useRef<HTMLInputElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   const { data: acrStatus } = useGetAcrStatus();
   const identifyMutation = useIdentifyAudioWindow();
   const { data: replacementTracks } = useListReplacementTracks();
 
+  const getAudioContext = () => {
+    if (!audioCtxRef.current) {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioCtx();
+    }
+    return audioCtxRef.current;
+  };
+
+  useEffect(() => {
+    return () => {
+      audioCtxRef.current?.close().catch(() => {});
+      audioCtxRef.current = null;
+    };
+  }, []);
+
   const reset = () => {
     setFile(null);
-    setFileType("");
+    setFileType(null);
     setAudioBuf(null);
     setDuration(0);
     setStep(STEP.IDLE);
@@ -55,6 +78,9 @@ export default function Home() {
     setCurWin(0);
     setTotalWin(0);
     setResults([]);
+    setScanWarnings([]);
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
   };
 
   const processFile = useCallback(async (f: File) => {
@@ -91,9 +117,7 @@ export default function Home() {
       setStep(STEP.LOADING);
       try {
         const ab = await f.arrayBuffer();
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioCtx();
-        const decoded = await ctx.decodeAudioData(ab);
+        const decoded = await getAudioContext().decodeAudioData(ab);
         setAudioBuf(decoded);
         setDuration(decoded.duration);
         setStep(STEP.READY);
@@ -116,9 +140,7 @@ export default function Home() {
     setStatusMsg("Decoding audio...");
     try {
       const ab = await wavBlob.arrayBuffer();
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioCtx();
-      const decoded = await ctx.decodeAudioData(ab);
+      const decoded = await getAudioContext().decodeAudioData(ab);
       setAudioBuf(decoded);
       setDuration(decoded.duration);
       setStep(STEP.READY);
@@ -132,45 +154,52 @@ export default function Home() {
     if (!audioBuf) return;
     setStep(STEP.SCANNING);
     setResults([]);
+    setScanWarnings([]);
     setProgress(0);
 
-    const steps = Math.max(1, Math.ceil(duration / 30));
+    const steps = Math.max(1, Math.ceil(duration / WINDOW_SECONDS));
     setTotalWin(steps);
-    const found: any[] = [];
+    const found: AcrIdentifyResult[] = [];
+    const warnings: string[] = [];
 
     for (let i = 0; i < steps; i++) {
       setCurWin(i + 1);
-      setProgress(Math.round((i / steps) * 100));
-      
-      const b64 = extractSnippet(audioBuf, i * 30, 10);
-      if (!b64) continue;
-      
-      try {
-        const data = await identifyMutation.mutateAsync({
-          data: {
-            sampleBase64: b64,
-            windowIndex: i + 1,
-            offsetSeconds: i * 30,
-            durationSeconds: 10
+
+      const offsetSeconds = i * WINDOW_SECONDS;
+      const b64 = extractSnippet(audioBuf, offsetSeconds, SNIPPET_SECONDS);
+      if (b64) {
+        try {
+          const data = await identifyMutation.mutateAsync({
+            data: {
+              sampleBase64: b64,
+              windowIndex: i + 1,
+              offsetSeconds,
+              durationSeconds: SNIPPET_SECONDS,
+            },
+          });
+
+          if (data.matched) {
+            found.push(data);
+            setResults([...found]);
           }
-        });
-        
-        if (data.matched) {
-          found.push(data);
+        } catch (e: any) {
+          warnings.push(`Window ${i + 1} (${formatTime(offsetSeconds)}): ${e.message ?? "request failed"}`);
         }
-      } catch (e: any) {
-        setErrorMsg(`Scan error on window ${i + 1}: ${e.message}`);
-        setStep(STEP.ERROR);
-        return;
       }
+
+      setProgress(Math.round(((i + 1) / steps) * 100));
     }
 
-    setProgress(100);
-    setResults(found);
+    setScanWarnings(warnings);
     setStep(STEP.DONE);
   };
 
-  const risk = results.length === 0 ? "safe" : results.length <= 2 ? "medium" : "high";
+  const risk =
+    results.length === 0
+      ? "safe"
+      : results.length < HIGH_RISK_MATCH_COUNT
+        ? "medium"
+        : "high";
 
   return (
     <div className="min-h-[100dvh] w-full bg-background flex flex-col items-center py-12 px-4 font-sans text-foreground">
@@ -278,7 +307,7 @@ export default function Home() {
               <div className="flex-1 min-w-0">
                 <h3 className="font-medium text-white truncate">{file?.name}</h3>
                 <div className="text-sm text-muted-foreground font-mono mt-1">
-                  {formatTime(duration)} • {Math.ceil(duration / 30)} windows
+                  {formatTime(duration)} • {Math.ceil(duration / WINDOW_SECONDS)} windows
                 </div>
               </div>
               <Button variant="ghost" size="icon" onClick={reset} className="shrink-0" data-testid="button-cancel-ready">
@@ -335,6 +364,20 @@ export default function Home() {
               </p>
             </Card>
 
+            {scanWarnings.length > 0 && (
+              <Card className="p-4 border-yellow-500/30 bg-yellow-500/5 text-sm flex gap-3">
+                <AlertCircle className="w-5 h-5 shrink-0 text-yellow-500" />
+                <div>
+                  <p className="font-semibold text-yellow-500">
+                    {scanWarnings.length} window{scanWarnings.length === 1 ? "" : "s"} could not be scanned
+                  </p>
+                  <p className="opacity-80 mt-1">
+                    Other windows completed. Re-scan if you want full coverage.
+                  </p>
+                </div>
+              </Card>
+            )}
+
             {/* Matched Sections */}
             {results.length > 0 && (
               <div className="space-y-3">
@@ -352,9 +395,11 @@ export default function Home() {
                       <Badge variant="outline" className="font-mono bg-red-500/10 text-red-500 border-red-500/20">
                         {formatTime(r.offsetSeconds)} - {formatTime(r.offsetSeconds + r.durationSeconds)}
                       </Badge>
-                      <span className="text-xs text-muted-foreground font-mono">
-                        Score: {r.score}%
-                      </span>
+                      {typeof r.score === "number" && (
+                        <span className="text-xs text-muted-foreground font-mono">
+                          Score: {r.score}%
+                        </span>
+                      )}
                     </div>
                   </Card>
                 ))}
