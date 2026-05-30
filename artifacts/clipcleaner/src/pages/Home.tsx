@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning, Copy, Check } from "lucide-react";
+import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning, Copy, Check, X } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   isVideo,
   convertToWav,
   extractSnippet,
+  type ProgressReport,
 } from "@/lib/audio";
 import { useGetAcrStatus, useIdentifyAudioWindow, useListReplacementTracks } from "@workspace/api-client-react";
 import type { AcrIdentifyResult } from "@workspace/api-client-react";
@@ -31,6 +32,7 @@ type Step = (typeof STEP)[keyof typeof STEP];
 const WINDOW_SECONDS = 30;
 const SNIPPET_SECONDS = 10;
 const HIGH_RISK_MATCH_COUNT = 3;
+const SCAN_CONCURRENCY = 4;
 
 function formatTime(seconds: number) {
   const mins = Math.floor(seconds / 60);
@@ -47,6 +49,7 @@ export default function Home() {
   const [statusMsg, setStatusMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [progress, setProgress] = useState(0);
+  const [stepPercent, setStepPercent] = useState<number | null>(null);
   const [curWin, setCurWin] = useState(0);
   const [totalWin, setTotalWin] = useState(0);
   const [results, setResults] = useState<AcrIdentifyResult[]>([]);
@@ -54,6 +57,7 @@ export default function Home() {
   const [rejectedSizeMB, setRejectedSizeMB] = useState(0);
   const [commandCopied, setCommandCopied] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const dragCounter = useRef(0);
 
   const ffmpegCommand = "ffmpeg -i input.mp4 -vn -acodec libmp3lame -b:a 192k output.mp3";
 
@@ -69,10 +73,17 @@ export default function Home() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const scanAbortRef = useRef<AbortController | null>(null);
 
   const { data: acrStatus } = useGetAcrStatus();
   const identifyMutation = useIdentifyAudioWindow();
   const { data: replacementTracks } = useListReplacementTracks();
+  const acrConfigured = acrStatus?.configured ?? false;
+
+  const handleProgress = useCallback((report: ProgressReport) => {
+    setStatusMsg(report.message);
+    setStepPercent(typeof report.percent === "number" ? report.percent : null);
+  }, []);
 
   const getAudioContext = () => {
     if (!audioCtxRef.current) {
@@ -90,6 +101,8 @@ export default function Home() {
   }, []);
 
   const reset = () => {
+    scanAbortRef.current?.abort();
+    scanAbortRef.current = null;
     setFile(null);
     setFileType(null);
     setAudioBuf(null);
@@ -98,14 +111,20 @@ export default function Home() {
     setStatusMsg("");
     setErrorMsg("");
     setProgress(0);
+    setStepPercent(null);
     setCurWin(0);
     setTotalWin(0);
     setResults([]);
     setScanWarnings([]);
     setRejectedSizeMB(0);
     setCommandCopied(false);
+    dragCounter.current = 0;
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
+  };
+
+  const cancelScan = () => {
+    scanAbortRef.current?.abort();
   };
 
   const processFile = useCallback(async (f: File) => {
@@ -132,7 +151,7 @@ export default function Home() {
     if (isVid) {
       setStep(STEP.CONVERTING);
       try {
-        wavBlob = await convertToWav(f, (msg) => setStatusMsg(msg));
+        wavBlob = await convertToWav(f, handleProgress);
       } catch (e: any) {
         setErrorMsg(`Could not extract audio. Error: ${e.message}`);
         setStep(STEP.ERROR);
@@ -148,11 +167,11 @@ export default function Home() {
         setStep(STEP.READY);
         return;
       } catch {
-        // Fallback to ffmpeg
+        // Audio decode failed in native browser path — try server/ffmpeg conversion.
         setStep(STEP.CONVERTING);
-        setStatusMsg("Converting audio format...");
+        handleProgress({ message: "Converting audio format…" });
         try {
-          wavBlob = await convertToWav(f, (msg) => setStatusMsg(msg));
+          wavBlob = await convertToWav(f, handleProgress);
         } catch (e: any) {
           setErrorMsg(`Could not decode audio. Error: ${e.message}`);
           setStep(STEP.ERROR);
@@ -162,7 +181,7 @@ export default function Home() {
     }
 
     setStep(STEP.LOADING);
-    setStatusMsg("Decoding audio...");
+    handleProgress({ message: "Decoding audio…" });
     try {
       const ab = await wavBlob.arrayBuffer();
       const decoded = await getAudioContext().decodeAudioData(ab);
@@ -173,46 +192,83 @@ export default function Home() {
       setErrorMsg("Failed to decode the converted audio.");
       setStep(STEP.ERROR);
     }
-  }, []);
+  }, [handleProgress]);
 
   const startScan = async () => {
     if (!audioBuf) return;
+
+    if (!acrConfigured) {
+      setErrorMsg(
+        "ACRCloud isn't configured. Ask your admin to set ACR_ACCESS_KEY and ACR_ACCESS_SECRET, " +
+          "then try again.",
+      );
+      setStep(STEP.ERROR);
+      return;
+    }
+
+    const abort = new AbortController();
+    scanAbortRef.current = abort;
+
     setStep(STEP.SCANNING);
     setResults([]);
     setScanWarnings([]);
     setProgress(0);
+    setStepPercent(null);
 
-    const steps = Math.max(1, Math.ceil(duration / WINDOW_SECONDS));
-    setTotalWin(steps);
+    const totalWindows = Math.max(1, Math.ceil(duration / WINDOW_SECONDS));
+    setTotalWin(totalWindows);
+    setCurWin(0);
+
     const found: AcrIdentifyResult[] = [];
     const warnings: string[] = [];
+    let completed = 0;
+    let nextWindow = 0;
 
-    for (let i = 0; i < steps; i++) {
-      setCurWin(i + 1);
+    const worker = async () => {
+      while (!abort.signal.aborted) {
+        const i = nextWindow++;
+        if (i >= totalWindows) return;
 
-      const offsetSeconds = i * WINDOW_SECONDS;
-      const b64 = extractSnippet(audioBuf, offsetSeconds, SNIPPET_SECONDS);
-      if (b64) {
-        try {
-          const data = await identifyMutation.mutateAsync({
-            data: {
-              sampleBase64: b64,
-              windowIndex: i + 1,
-              offsetSeconds,
-              durationSeconds: SNIPPET_SECONDS,
-            },
-          });
+        const offsetSeconds = i * WINDOW_SECONDS;
+        const b64 = extractSnippet(audioBuf, offsetSeconds, SNIPPET_SECONDS);
 
-          if (data.matched) {
-            found.push(data);
-            setResults([...found]);
+        if (b64) {
+          try {
+            const data = await identifyMutation.mutateAsync({
+              data: {
+                sampleBase64: b64,
+                windowIndex: i + 1,
+                offsetSeconds,
+                durationSeconds: SNIPPET_SECONDS,
+              },
+            });
+            if (abort.signal.aborted) return;
+            if (data.matched) {
+              found.push(data);
+              const sorted = [...found].sort((a, b) => a.offsetSeconds - b.offsetSeconds);
+              setResults(sorted);
+            }
+          } catch (e: any) {
+            if (abort.signal.aborted) return;
+            warnings.push(`Window ${i + 1} (${formatTime(offsetSeconds)}): ${e.message ?? "request failed"}`);
           }
-        } catch (e: any) {
-          warnings.push(`Window ${i + 1} (${formatTime(offsetSeconds)}): ${e.message ?? "request failed"}`);
         }
-      }
 
-      setProgress(Math.round(((i + 1) / steps) * 100));
+        completed += 1;
+        setCurWin(Math.min(completed, totalWindows));
+        setProgress(Math.round((completed / totalWindows) * 100));
+      }
+    };
+
+    const workerCount = Math.min(SCAN_CONCURRENCY, totalWindows);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    if (scanAbortRef.current === abort) scanAbortRef.current = null;
+
+    if (abort.signal.aborted) {
+      // User cancelled — go back to READY so they can re-scan or pick another file.
+      setStep(STEP.READY);
+      return;
     }
 
     setScanWarnings(warnings);
@@ -261,16 +317,34 @@ export default function Home() {
         {/* IDLE: Upload */}
         {step === STEP.IDLE && (
           <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => { 
-              e.preventDefault(); 
-              setDragOver(false); 
-              const f = e.dataTransfer.files[0]; 
-              if (f) processFile(f); 
+            role="button"
+            tabIndex={0}
+            aria-label="Drop a media file to scan, or press Enter to choose one"
+            onDragEnter={(e) => {
+              e.preventDefault();
+              dragCounter.current += 1;
+              setDragOver(true);
+            }}
+            onDragOver={(e) => { e.preventDefault(); }}
+            onDragLeave={() => {
+              dragCounter.current = Math.max(0, dragCounter.current - 1);
+              if (dragCounter.current === 0) setDragOver(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              dragCounter.current = 0;
+              setDragOver(false);
+              const f = e.dataTransfer.files[0];
+              if (f) processFile(f);
             }}
             onClick={() => inputRef.current?.click()}
-            className={`border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer transition-colors duration-200 ease-in-out flex flex-col items-center gap-4 ${
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                inputRef.current?.click();
+              }
+            }}
+            className={`border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer transition-colors duration-200 ease-in-out flex flex-col items-center gap-4 focus:outline-none focus:ring-2 focus:ring-primary/50 ${
               dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-card/50"
             }`}
             data-testid="upload-zone"
@@ -300,12 +374,21 @@ export default function Home() {
         {(step === STEP.CONVERTING || step === STEP.LOADING) && (
           <Card className="p-12 text-center flex flex-col items-center gap-6 border-border bg-card">
             <div className="w-16 h-16 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-            <div>
+            <div className="w-full max-w-sm">
               <h3 className="text-lg font-medium text-white mb-2">
                 {step === STEP.CONVERTING ? "Extracting Audio..." : "Decoding Audio..."}
               </h3>
               <p className="text-sm text-muted-foreground">{statusMsg}</p>
+              {typeof stepPercent === "number" && (
+                <div className="mt-4 space-y-1.5">
+                  <Progress value={stepPercent} className="h-2 bg-secondary" />
+                  <p className="text-xs text-muted-foreground font-mono">{stepPercent}%</p>
+                </div>
+              )}
             </div>
+            <Button variant="ghost" size="sm" onClick={reset} data-testid="button-cancel-processing">
+              Cancel
+            </Button>
           </Card>
         )}
 
@@ -427,17 +510,22 @@ export default function Home() {
 
         {/* SCANNING */}
         {step === STEP.SCANNING && (
-          <Card className="p-8 border-border bg-card">
-            <div className="flex justify-between items-end mb-4">
+          <Card className="p-8 border-border bg-card space-y-4">
+            <div className="flex justify-between items-end">
               <div>
                 <h3 className="font-medium text-white mb-1">Scanning for matches...</h3>
                 <p className="text-sm text-muted-foreground font-mono">
-                  Window {curWin} of {totalWin}
+                  {curWin} of {totalWin} windows · {results.length} match{results.length === 1 ? "" : "es"} so far
                 </p>
               </div>
               <span className="text-2xl font-light font-mono text-primary">{progress}%</span>
             </div>
             <Progress value={progress} className="h-2 bg-secondary" />
+            <div className="flex justify-end">
+              <Button variant="ghost" size="sm" onClick={cancelScan} data-testid="button-cancel-scan">
+                <X className="w-4 h-4 mr-1.5" /> Cancel scan
+              </Button>
+            </div>
           </Card>
         )}
 

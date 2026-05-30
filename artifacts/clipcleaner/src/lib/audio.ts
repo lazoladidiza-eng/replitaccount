@@ -4,12 +4,22 @@ export const SUPPORTED_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".mp3", 
 // on the browser-side ffmpeg path so the video never leaves the device.
 export const SERVER_UPLOAD_LIMIT_MB = 500;
 
-// Hard ceiling for what the browser can plausibly handle in-memory. Above
-// this we ask the user to extract audio first (see the TOO_LARGE UI state).
-export const LARGE_FILE_THRESHOLD_MB = 2048;
+// Hard ceiling for what the browser can plausibly handle in-memory. ffmpeg.wasm
+// uses a 32-bit heap and most browsers cap WASM memory near 4 GB, but the
+// file is doubled (written to ffmpeg's MEMFS + decoded), so 1.5 GB is a
+// conservative ceiling that avoids OOMs on typical hardware.
+export const LARGE_FILE_THRESHOLD_MB = 1500;
 
 // Public maximum surfaced to the upload UI.
 export const MAX_SIZE_MB = LARGE_FILE_THRESHOLD_MB;
+
+export type ProgressReport = {
+  message: string;
+  /** 0-100, optional. When present the UI shows a progress bar. */
+  percent?: number;
+};
+
+export type ProgressFn = (report: ProgressReport) => void;
 
 export const isVideo = (f: File) =>
   f.type.startsWith("video/") ||
@@ -66,55 +76,92 @@ export async function getFFmpeg() {
   return ffmpegLoader;
 }
 
-async function extractInBrowser(file: File, onProgress: (msg: string) => void): Promise<Blob> {
-  onProgress("Preparing in-browser audio extractor…");
+async function extractInBrowser(file: File, onProgress: ProgressFn): Promise<Blob> {
+  onProgress({ message: "Preparing in-browser audio extractor…" });
   const { ff, fetchFile } = await getFFmpeg();
 
-  onProgress("Extracting audio on this device…");
+  ff.setProgress(({ ratio }: { ratio: number }) => {
+    if (typeof ratio === "number" && ratio >= 0 && ratio <= 1) {
+      onProgress({
+        message: "Extracting audio on this device…",
+        percent: Math.round(ratio * 100),
+      });
+    }
+  });
+
+  onProgress({ message: "Extracting audio on this device…", percent: 0 });
   const inputName = "input" + file.name.slice(file.name.lastIndexOf("."));
   ff.FS("writeFile", inputName, await fetchFile(file));
 
-  await ff.run(
-    "-i", inputName,
-    "-vn",             // strip video track
-    "-acodec", "pcm_s16le",
-    "-ar", "16000",    // 16kHz for ACRCloud
-    "-ac", "1",        // mono
-    "output.wav",
-  );
+  try {
+    await ff.run(
+      "-i", inputName,
+      "-vn",             // strip video track
+      "-acodec", "pcm_s16le",
+      "-ar", "16000",    // 16kHz for ACRCloud
+      "-ac", "1",        // mono
+      "output.wav",
+    );
 
-  const data = ff.FS("readFile", "output.wav");
-  try { ff.FS("unlink", inputName); } catch {}
-  try { ff.FS("unlink", "output.wav"); } catch {}
-
-  return new Blob([data.slice().buffer], { type: "audio/wav" });
+    const data = ff.FS("readFile", "output.wav");
+    return new Blob([data.slice().buffer], { type: "audio/wav" });
+  } finally {
+    try { ff.FS("unlink", inputName); } catch {}
+    try { ff.FS("unlink", "output.wav"); } catch {}
+    ff.setProgress(() => {});
+  }
 }
 
-async function extractOnServer(file: File, onProgress: (msg: string) => void): Promise<Blob> {
-  onProgress("Uploading file for server-side audio extraction…");
-  const response = await fetch("/api/audio/extract", {
-    method: "POST",
-    headers: {
-      "content-type": "application/octet-stream",
-      "x-filename": encodeURIComponent(file.name),
-    },
-    body: file,
+function uploadWithProgress(file: File, onProgress: ProgressFn): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/audio/extract");
+    xhr.setRequestHeader("content-type", "application/octet-stream");
+    xhr.setRequestHeader("x-filename", encodeURIComponent(file.name));
+    xhr.responseType = "blob";
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        onProgress({
+          message: "Uploading to server for audio extraction…",
+          percent: Math.round((e.loaded / e.total) * 100),
+        });
+      }
+    };
+
+    xhr.upload.onload = () => {
+      onProgress({ message: "Server is extracting audio…" });
+    };
+
+    xhr.onerror = () => reject(new Error("Network error during upload."));
+    xhr.ontimeout = () => reject(new Error("Upload timed out."));
+
+    xhr.onload = async () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.response as Blob);
+        return;
+      }
+      // Try to surface the server's JSON `details` field
+      let message = `Server returned HTTP ${xhr.status}`;
+      try {
+        const text = await (xhr.response as Blob).text();
+        const parsed = JSON.parse(text);
+        message = parsed.details || parsed.error || text || message;
+      } catch {
+        // body was not JSON — keep the status message
+      }
+      reject(new Error(message));
+    };
+
+    xhr.send(file);
   });
+}
 
-  if (!response.ok) {
-    const text = await response.text();
-    let message = text;
-    try {
-      const parsed = JSON.parse(text);
-      message = parsed.details || parsed.error || text;
-    } catch {
-      // not JSON — keep raw text
-    }
-    throw new Error(message || `Server returned HTTP ${response.status}`);
-  }
-
-  onProgress("Audio extracted successfully…");
-  return await response.blob();
+async function extractOnServer(file: File, onProgress: ProgressFn): Promise<Blob> {
+  onProgress({ message: "Uploading to server for audio extraction…", percent: 0 });
+  const blob = await uploadWithProgress(file, onProgress);
+  onProgress({ message: "Audio extracted successfully…" });
+  return blob;
 }
 
 /**
@@ -125,7 +172,7 @@ async function extractOnServer(file: File, onProgress: (msg: string) => void): P
  *   - Smaller files prefer the browser path when available (no upload),
  *     and fall back to the server when it isn't.
  */
-export async function convertToWav(file: File, onProgress: (msg: string) => void): Promise<Blob> {
+export async function convertToWav(file: File, onProgress: ProgressFn): Promise<Blob> {
   const tooBigForServer = file.size > SERVER_UPLOAD_LIMIT_MB * 1024 * 1024;
 
   if (canUseBrowserFFmpeg()) {
@@ -133,7 +180,7 @@ export async function convertToWav(file: File, onProgress: (msg: string) => void
       return await extractInBrowser(file, onProgress);
     } catch (browserErr) {
       if (tooBigForServer) throw browserErr;
-      // fall through to server
+      // Browser path failed for a smaller file — fall through to server.
     }
   } else if (tooBigForServer) {
     throw new Error(
@@ -149,21 +196,21 @@ export function encodeWAV(samples: Float32Array, sampleRate: number): ArrayBuffe
   const buf = new ArrayBuffer(44 + samples.length * 2);
   const v = new DataView(buf);
   const ws = (o: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-  
-  ws(0, "RIFF"); 
+
+  ws(0, "RIFF");
   v.setUint32(4, 36 + samples.length * 2, true);
-  ws(8, "WAVE"); 
+  ws(8, "WAVE");
   ws(12, "fmt ");
-  v.setUint32(16, 16, true); 
-  v.setUint16(20, 1, true); 
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
   v.setUint16(22, 1, true);
-  v.setUint32(24, sampleRate, true); 
+  v.setUint32(24, sampleRate, true);
   v.setUint32(28, sampleRate * 2, true);
-  v.setUint16(32, 2, true); 
+  v.setUint16(32, 2, true);
   v.setUint16(34, 16, true);
-  ws(36, "data"); 
+  ws(36, "data");
   v.setUint32(40, samples.length * 2, true);
-  
+
   let off = 44;
   for (let i = 0; i < samples.length; i++) {
     const s = Math.max(-1, Math.min(1, samples[i]));
@@ -173,27 +220,34 @@ export function encodeWAV(samples: Float32Array, sampleRate: number): ArrayBuffe
   return buf;
 }
 
+// Chunked Uint8Array → base64. Avoids the per-byte `binary += String.fromCharCode(...)`
+// hotspot, which is O(n²) under naive string growth and ran for every snippet.
+function uint8ToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK))));
+  }
+  return btoa(parts.join(""));
+}
+
 export function extractSnippet(audioBuffer: AudioBuffer, offsetSec: number, durationSec = 10): string | null {
   const sr = audioBuffer.sampleRate;
   const start = Math.floor(offsetSec * sr);
   const end = Math.min(start + Math.floor(durationSec * sr), audioBuffer.length);
   const len = end - start;
-  
+
   if (len <= 0) return null;
-  
+
+  const channels = audioBuffer.numberOfChannels;
   const mono = new Float32Array(len);
-  for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+  for (let c = 0; c < channels; c++) {
     const ch = audioBuffer.getChannelData(c);
     for (let i = 0; i < len; i++) {
-      mono[i] += ch[start + i] / audioBuffer.numberOfChannels;
+      mono[i] += ch[start + i] / channels;
     }
   }
-  
+
   const buf = encodeWAV(mono, sr);
-  const bytes = new Uint8Array(buf);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  return uint8ToBase64(new Uint8Array(buf));
 }

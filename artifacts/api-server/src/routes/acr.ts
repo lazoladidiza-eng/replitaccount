@@ -144,7 +144,19 @@ router.post("/acr/identify", async (req, res): Promise<void> => {
       return;
     }
 
-    const result = await response.json();
+    type AcrTrack = {
+      title?: string;
+      artists?: Array<{ name?: string }>;
+      album?: { name?: string };
+      label?: string;
+      score?: number;
+      acrid?: string;
+    };
+    type AcrResponse = {
+      status?: { code?: number; msg?: string };
+      metadata?: { music?: AcrTrack[] };
+    };
+    const result = (await response.json()) as AcrResponse;
     const track = result?.metadata?.music?.[0];
     const data = IdentifyAudioWindowResponse.parse({
       windowIndex: parsed.data.windowIndex,
