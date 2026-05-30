@@ -28,6 +28,25 @@ export const isVideo = (f: File) =>
 export const canUseBrowserFFmpeg = () =>
   typeof SharedArrayBuffer !== "undefined" && (window as any).crossOriginIsolated === true;
 
+/**
+ * True when the page is loaded inside an iframe AND not cross-origin isolated.
+ * This is exactly the Replit-preview shape: our headers reach our document,
+ * but the parent frame doesn't grant `cross-origin-isolated` to children, so
+ * `crossOriginIsolated` is always false and the in-browser ffmpeg path can't
+ * activate. Opening the page in a new tab loads it as a top-level document
+ * where our headers do take effect.
+ */
+export function isIsolationBlockedByFrame(): boolean {
+  if (typeof window === "undefined") return false;
+  if ((window as any).crossOriginIsolated === true) return false;
+  try {
+    return window.top !== window.self;
+  } catch {
+    // Cross-origin access to window.top throws — that itself means we're framed.
+    return true;
+  }
+}
+
 let ffmpegInstance: { ff: any; fetchFile: (file: File) => Promise<Uint8Array> } | null = null;
 let ffmpegLoader: Promise<{ ff: any; fetchFile: (file: File) => Promise<Uint8Array> }> | null = null;
 

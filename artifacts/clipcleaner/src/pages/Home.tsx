@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning, Copy, Check, X } from "lucide-react";
+import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning, Copy, Check, X, ExternalLink } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import {
   MAX_SIZE_MB,
   LARGE_FILE_THRESHOLD_MB,
   canUseBrowserFFmpeg,
+  isIsolationBlockedByFrame,
   isVideo,
   convertToWav,
   extractSnippet,
@@ -74,6 +75,11 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const scanAbortRef = useRef<AbortController | null>(null);
+
+  // Captured once on mount: cross-origin isolation can't change without a reload,
+  // and we don't want this banner flickering as state updates.
+  const [isolationBlocked] = useState(() => isIsolationBlockedByFrame());
+  const standaloneUrl = typeof window !== "undefined" ? window.location.href : "#";
 
   const { data: acrStatus } = useGetAcrStatus();
   const identifyMutation = useIdentifyAudioWindow();
@@ -311,6 +317,35 @@ export default function Home() {
               <p className="opacity-90">{acrStatus.message}</p>
               <p className="opacity-90 mt-1">You can still test the file extraction flow.</p>
             </div>
+          </Card>
+        )}
+
+        {/* Preview-iframe warning: in Replit's editor preview the iframe can't
+            be cross-origin isolated, so the on-device extractor never activates
+            and uploads fall back to the server's 500 MB ceiling. Opening the
+            same URL in a new tab loads it as a top-level document where our
+            COOP/COEP headers actually take effect. */}
+        {step === STEP.IDLE && isolationBlocked && (
+          <Card className="p-4 border-primary/30 bg-primary/5 text-sm flex flex-col sm:flex-row sm:items-center gap-3" data-testid="iframe-isolation-warning">
+            <AlertCircle className="w-5 h-5 shrink-0 text-primary" />
+            <div className="flex-1">
+              <p className="font-semibold text-white">Faster scans available in a new tab</p>
+              <p className="text-muted-foreground mt-0.5">
+                You're viewing this inside an embedded preview. Open it in a new tab
+                to enable on-device audio extraction — files up to {Math.round(MAX_SIZE_MB / 1024)} GB
+                stay on your computer instead of being uploaded.
+              </p>
+            </div>
+            <a
+              href={standaloneUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 hover:bg-primary/20 transition-colors px-3 py-2 text-xs font-medium text-primary"
+              data-testid="link-open-new-tab"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Open in new tab
+            </a>
           </Card>
         )}
 
