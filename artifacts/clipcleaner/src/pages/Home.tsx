@@ -1,21 +1,39 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play } from "lucide-react";
+import { UploadCloud, FileVideo, FileAudio, AlertCircle, CheckCircle2, Music, Shield, Play, FileWarning, Copy, Check, X, ExternalLink } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { SUPPORTED_EXTS, MAX_SIZE_MB, isVideo, convertToWav, extractSnippet } from "@/lib/audio";
+import {
+  SUPPORTED_EXTS,
+  MAX_SIZE_MB,
+  LARGE_FILE_THRESHOLD_MB,
+  canUseBrowserFFmpeg,
+  isIsolationBlockedByFrame,
+  isVideo,
+  convertToWav,
+  extractSnippet,
+  type ProgressReport,
+} from "@/lib/audio";
 import { useGetAcrStatus, useIdentifyAudioWindow, useListReplacementTracks } from "@workspace/api-client-react";
+import type { AcrIdentifyResult } from "@workspace/api-client-react";
 
-const STEP = { 
-  IDLE: "idle", 
-  CONVERTING: "converting", 
-  LOADING: "loading", 
-  READY: "ready", 
-  SCANNING: "scanning", 
-  DONE: "done", 
-  ERROR: "error" 
-};
+const STEP = {
+  IDLE: "idle",
+  CONVERTING: "converting",
+  LOADING: "loading",
+  READY: "ready",
+  SCANNING: "scanning",
+  DONE: "done",
+  ERROR: "error",
+  TOO_LARGE: "too_large",
+} as const;
+type Step = (typeof STEP)[keyof typeof STEP];
+
+const WINDOW_SECONDS = 30;
+const SNIPPET_SECONDS = 10;
+const HIGH_RISK_MATCH_COUNT = 3;
+const SCAN_CONCURRENCY = 4;
 
 function formatTime(seconds: number) {
   const mins = Math.floor(seconds / 60);
@@ -25,36 +43,94 @@ function formatTime(seconds: number) {
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [fileType, setFileType] = useState<"video" | "audio" | "">("");
+  const [fileType, setFileType] = useState<"video" | "audio" | null>(null);
   const [audioBuf, setAudioBuf] = useState<AudioBuffer | null>(null);
   const [duration, setDuration] = useState(0);
-  const [step, setStep] = useState(STEP.IDLE);
+  const [step, setStep] = useState<Step>(STEP.IDLE);
   const [statusMsg, setStatusMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [progress, setProgress] = useState(0);
+  const [stepPercent, setStepPercent] = useState<number | null>(null);
   const [curWin, setCurWin] = useState(0);
   const [totalWin, setTotalWin] = useState(0);
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<AcrIdentifyResult[]>([]);
+  const [scanWarnings, setScanWarnings] = useState<string[]>([]);
+  const [rejectedSizeMB, setRejectedSizeMB] = useState(0);
+  const [commandCopied, setCommandCopied] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  
+  const dragCounter = useRef(0);
+
+  const ffmpegCommand = "ffmpeg -i input.mp4 -vn -acodec libmp3lame -b:a 192k output.mp3";
+
+  const copyFfmpegCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(ffmpegCommand);
+      setCommandCopied(true);
+      setTimeout(() => setCommandCopied(false), 2000);
+    } catch {
+      // clipboard access can be blocked; user can still select-and-copy the visible text
+    }
+  };
+
   const inputRef = useRef<HTMLInputElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const scanAbortRef = useRef<AbortController | null>(null);
+
+  // Captured once on mount: cross-origin isolation can't change without a reload,
+  // and we don't want this banner flickering as state updates.
+  const [isolationBlocked] = useState(() => isIsolationBlockedByFrame());
+  const standaloneUrl = typeof window !== "undefined" ? window.location.href : "#";
 
   const { data: acrStatus } = useGetAcrStatus();
   const identifyMutation = useIdentifyAudioWindow();
   const { data: replacementTracks } = useListReplacementTracks();
+  const acrConfigured = acrStatus?.configured ?? false;
+
+  const handleProgress = useCallback((report: ProgressReport) => {
+    setStatusMsg(report.message);
+    setStepPercent(typeof report.percent === "number" ? report.percent : null);
+  }, []);
+
+  const getAudioContext = () => {
+    if (!audioCtxRef.current) {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioCtx();
+    }
+    return audioCtxRef.current;
+  };
+
+  useEffect(() => {
+    return () => {
+      audioCtxRef.current?.close().catch(() => {});
+      audioCtxRef.current = null;
+    };
+  }, []);
 
   const reset = () => {
+    scanAbortRef.current?.abort();
+    scanAbortRef.current = null;
     setFile(null);
-    setFileType("");
+    setFileType(null);
     setAudioBuf(null);
     setDuration(0);
     setStep(STEP.IDLE);
     setStatusMsg("");
     setErrorMsg("");
     setProgress(0);
+    setStepPercent(null);
     setCurWin(0);
     setTotalWin(0);
     setResults([]);
+    setScanWarnings([]);
+    setRejectedSizeMB(0);
+    setCommandCopied(false);
+    dragCounter.current = 0;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+  };
+
+  const cancelScan = () => {
+    scanAbortRef.current?.abort();
   };
 
   const processFile = useCallback(async (f: File) => {
@@ -67,9 +143,9 @@ export default function Home() {
       setStep(STEP.ERROR);
       return;
     }
-    if (f.size > MAX_SIZE_MB * 1024 * 1024) {
-      setErrorMsg(`File too large (${(f.size / 1024 / 1024).toFixed(0)}MB). Maximum is ${MAX_SIZE_MB}MB.`);
-      setStep(STEP.ERROR);
+    if (f.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024) {
+      setRejectedSizeMB(f.size / 1024 / 1024);
+      setStep(STEP.TOO_LARGE);
       return;
     }
 
@@ -81,7 +157,7 @@ export default function Home() {
     if (isVid) {
       setStep(STEP.CONVERTING);
       try {
-        wavBlob = await convertToWav(f, (msg) => setStatusMsg(msg));
+        wavBlob = await convertToWav(f, handleProgress);
       } catch (e: any) {
         setErrorMsg(`Could not extract audio. Error: ${e.message}`);
         setStep(STEP.ERROR);
@@ -91,19 +167,17 @@ export default function Home() {
       setStep(STEP.LOADING);
       try {
         const ab = await f.arrayBuffer();
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioCtx();
-        const decoded = await ctx.decodeAudioData(ab);
+        const decoded = await getAudioContext().decodeAudioData(ab);
         setAudioBuf(decoded);
         setDuration(decoded.duration);
         setStep(STEP.READY);
         return;
       } catch {
-        // Fallback to ffmpeg
+        // Audio decode failed in native browser path — try server/ffmpeg conversion.
         setStep(STEP.CONVERTING);
-        setStatusMsg("Converting audio format...");
+        handleProgress({ message: "Converting audio format…" });
         try {
-          wavBlob = await convertToWav(f, (msg) => setStatusMsg(msg));
+          wavBlob = await convertToWav(f, handleProgress);
         } catch (e: any) {
           setErrorMsg(`Could not decode audio. Error: ${e.message}`);
           setStep(STEP.ERROR);
@@ -113,12 +187,10 @@ export default function Home() {
     }
 
     setStep(STEP.LOADING);
-    setStatusMsg("Decoding audio...");
+    handleProgress({ message: "Decoding audio…" });
     try {
       const ab = await wavBlob.arrayBuffer();
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioCtx();
-      const decoded = await ctx.decodeAudioData(ab);
+      const decoded = await getAudioContext().decodeAudioData(ab);
       setAudioBuf(decoded);
       setDuration(decoded.duration);
       setStep(STEP.READY);
@@ -126,51 +198,95 @@ export default function Home() {
       setErrorMsg("Failed to decode the converted audio.");
       setStep(STEP.ERROR);
     }
-  }, []);
+  }, [handleProgress]);
 
   const startScan = async () => {
     if (!audioBuf) return;
-    setStep(STEP.SCANNING);
-    setResults([]);
-    setProgress(0);
 
-    const steps = Math.max(1, Math.ceil(duration / 30));
-    setTotalWin(steps);
-    const found: any[] = [];
-
-    for (let i = 0; i < steps; i++) {
-      setCurWin(i + 1);
-      setProgress(Math.round((i / steps) * 100));
-      
-      const b64 = extractSnippet(audioBuf, i * 30, 10);
-      if (!b64) continue;
-      
-      try {
-        const data = await identifyMutation.mutateAsync({
-          data: {
-            sampleBase64: b64,
-            windowIndex: i + 1,
-            offsetSeconds: i * 30,
-            durationSeconds: 10
-          }
-        });
-        
-        if (data.matched) {
-          found.push(data);
-        }
-      } catch (e: any) {
-        setErrorMsg(`Scan error on window ${i + 1}: ${e.message}`);
-        setStep(STEP.ERROR);
-        return;
-      }
+    if (!acrConfigured) {
+      setErrorMsg(
+        "ACRCloud isn't configured. Ask your admin to set ACR_ACCESS_KEY and ACR_ACCESS_SECRET, " +
+          "then try again.",
+      );
+      setStep(STEP.ERROR);
+      return;
     }
 
-    setProgress(100);
-    setResults(found);
+    const abort = new AbortController();
+    scanAbortRef.current = abort;
+
+    setStep(STEP.SCANNING);
+    setResults([]);
+    setScanWarnings([]);
+    setProgress(0);
+    setStepPercent(null);
+
+    const totalWindows = Math.max(1, Math.ceil(duration / WINDOW_SECONDS));
+    setTotalWin(totalWindows);
+    setCurWin(0);
+
+    const found: AcrIdentifyResult[] = [];
+    const warnings: string[] = [];
+    let completed = 0;
+    let nextWindow = 0;
+
+    const worker = async () => {
+      while (!abort.signal.aborted) {
+        const i = nextWindow++;
+        if (i >= totalWindows) return;
+
+        const offsetSeconds = i * WINDOW_SECONDS;
+        const b64 = extractSnippet(audioBuf, offsetSeconds, SNIPPET_SECONDS);
+
+        if (b64) {
+          try {
+            const data = await identifyMutation.mutateAsync({
+              data: {
+                sampleBase64: b64,
+                windowIndex: i + 1,
+                offsetSeconds,
+                durationSeconds: SNIPPET_SECONDS,
+              },
+            });
+            if (abort.signal.aborted) return;
+            if (data.matched) {
+              found.push(data);
+              const sorted = [...found].sort((a, b) => a.offsetSeconds - b.offsetSeconds);
+              setResults(sorted);
+            }
+          } catch (e: any) {
+            if (abort.signal.aborted) return;
+            warnings.push(`Window ${i + 1} (${formatTime(offsetSeconds)}): ${e.message ?? "request failed"}`);
+          }
+        }
+
+        completed += 1;
+        setCurWin(Math.min(completed, totalWindows));
+        setProgress(Math.round((completed / totalWindows) * 100));
+      }
+    };
+
+    const workerCount = Math.min(SCAN_CONCURRENCY, totalWindows);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    if (scanAbortRef.current === abort) scanAbortRef.current = null;
+
+    if (abort.signal.aborted) {
+      // User cancelled — go back to READY so they can re-scan or pick another file.
+      setStep(STEP.READY);
+      return;
+    }
+
+    setScanWarnings(warnings);
     setStep(STEP.DONE);
   };
 
-  const risk = results.length === 0 ? "safe" : results.length <= 2 ? "medium" : "high";
+  const risk =
+    results.length === 0
+      ? "safe"
+      : results.length < HIGH_RISK_MATCH_COUNT
+        ? "medium"
+        : "high";
 
   return (
     <div className="min-h-[100dvh] w-full bg-background flex flex-col items-center py-12 px-4 font-sans text-foreground">
@@ -204,19 +320,66 @@ export default function Home() {
           </Card>
         )}
 
+        {/* Preview-iframe warning: in Replit's editor preview the iframe can't
+            be cross-origin isolated, so the on-device extractor never activates
+            and uploads fall back to the server's 500 MB ceiling. Opening the
+            same URL in a new tab loads it as a top-level document where our
+            COOP/COEP headers actually take effect. */}
+        {step === STEP.IDLE && isolationBlocked && (
+          <Card className="p-4 border-primary/30 bg-primary/5 text-sm flex flex-col sm:flex-row sm:items-center gap-3" data-testid="iframe-isolation-warning">
+            <AlertCircle className="w-5 h-5 shrink-0 text-primary" />
+            <div className="flex-1">
+              <p className="font-semibold text-white">Faster scans available in a new tab</p>
+              <p className="text-muted-foreground mt-0.5">
+                You're viewing this inside an embedded preview. Open it in a new tab
+                to enable on-device audio extraction — files up to {Math.round(MAX_SIZE_MB / 1024)} GB
+                stay on your computer instead of being uploaded.
+              </p>
+            </div>
+            <a
+              href={standaloneUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 hover:bg-primary/20 transition-colors px-3 py-2 text-xs font-medium text-primary"
+              data-testid="link-open-new-tab"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Open in new tab
+            </a>
+          </Card>
+        )}
+
         {/* IDLE: Upload */}
         {step === STEP.IDLE && (
           <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => { 
-              e.preventDefault(); 
-              setDragOver(false); 
-              const f = e.dataTransfer.files[0]; 
-              if (f) processFile(f); 
+            role="button"
+            tabIndex={0}
+            aria-label="Drop a media file to scan, or press Enter to choose one"
+            onDragEnter={(e) => {
+              e.preventDefault();
+              dragCounter.current += 1;
+              setDragOver(true);
+            }}
+            onDragOver={(e) => { e.preventDefault(); }}
+            onDragLeave={() => {
+              dragCounter.current = Math.max(0, dragCounter.current - 1);
+              if (dragCounter.current === 0) setDragOver(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              dragCounter.current = 0;
+              setDragOver(false);
+              const f = e.dataTransfer.files[0];
+              if (f) processFile(f);
             }}
             onClick={() => inputRef.current?.click()}
-            className={`border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer transition-colors duration-200 ease-in-out flex flex-col items-center gap-4 ${
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                inputRef.current?.click();
+              }
+            }}
+            className={`border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer transition-colors duration-200 ease-in-out flex flex-col items-center gap-4 focus:outline-none focus:ring-2 focus:ring-primary/50 ${
               dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-card/50"
             }`}
             data-testid="upload-zone"
@@ -226,7 +389,10 @@ export default function Home() {
             </div>
             <div>
               <h3 className="text-lg font-medium text-white">Drop media file to scan</h3>
-              <p className="text-sm text-muted-foreground mt-1">Video or Audio, up to {MAX_SIZE_MB}MB</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                Video or Audio, up to {Math.round(MAX_SIZE_MB / 1024)}GB
+                {canUseBrowserFFmpeg() ? " — processed on your device" : ""}
+              </p>
             </div>
             <input 
               ref={inputRef} 
@@ -243,12 +409,98 @@ export default function Home() {
         {(step === STEP.CONVERTING || step === STEP.LOADING) && (
           <Card className="p-12 text-center flex flex-col items-center gap-6 border-border bg-card">
             <div className="w-16 h-16 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-            <div>
+            <div className="w-full max-w-sm">
               <h3 className="text-lg font-medium text-white mb-2">
                 {step === STEP.CONVERTING ? "Extracting Audio..." : "Decoding Audio..."}
               </h3>
               <p className="text-sm text-muted-foreground">{statusMsg}</p>
+              {typeof stepPercent === "number" && (
+                <div className="mt-4 space-y-1.5">
+                  <Progress value={stepPercent} className="h-2 bg-secondary" />
+                  <p className="text-xs text-muted-foreground font-mono">{stepPercent}%</p>
+                </div>
+              )}
             </div>
+            <Button variant="ghost" size="sm" onClick={reset} data-testid="button-cancel-processing">
+              Cancel
+            </Button>
+          </Card>
+        )}
+
+        {/* TOO LARGE — show actionable guidance instead of a hard failure */}
+        {step === STEP.TOO_LARGE && (
+          <Card className="p-8 border-yellow-500/30 bg-yellow-500/5 flex flex-col gap-6" data-testid="too-large">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 rounded-full bg-yellow-500/10 flex items-center justify-center shrink-0">
+                <FileWarning className="w-6 h-6 text-yellow-500" />
+              </div>
+              <div>
+                <h3 className="text-lg font-medium text-yellow-500">File is too large to scan directly</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Your file is {rejectedSizeMB >= 1024
+                    ? `${(rejectedSizeMB / 1024).toFixed(1)} GB`
+                    : `${Math.round(rejectedSizeMB)} MB`}
+                  . The browser can't safely process anything over {Math.round(MAX_SIZE_MB / 1024)} GB.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h4 className="font-semibold text-white text-sm mb-2">Quick fix · Export audio only</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  In CapCut (or your editor), export the project as MP3 or M4A. The audio is typically
+                  under 200 MB even for a long video. Drop the audio file here instead.
+                </p>
+              </div>
+              <div className="rounded-lg border border-border bg-card p-4">
+                <h4 className="font-semibold text-white text-sm mb-2">Or · Export a 1080p version</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Re-export your video at 1080p (instead of 4K). A 1-hour 1080p file is usually 1–2 GB
+                  and works in the browser directly.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+              <div>
+                <h4 className="font-semibold text-white text-sm">Power user · Extract audio with one command</h4>
+                <p className="text-xs text-muted-foreground leading-relaxed mt-1">
+                  Paste this in your computer's Terminal (replace <code className="font-mono">input.mp4</code> with
+                  your file name). When it's done, drop the resulting <code className="font-mono">output.mp3</code> here.
+                </p>
+              </div>
+              <div className="flex items-stretch gap-2 rounded-md bg-secondary border border-border overflow-hidden">
+                <code className="flex-1 px-3 py-2 text-xs font-mono text-white overflow-x-auto whitespace-nowrap" data-testid="ffmpeg-command">
+                  {ffmpegCommand}
+                </code>
+                <button
+                  type="button"
+                  onClick={copyFfmpegCommand}
+                  className="shrink-0 px-3 flex items-center justify-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-white hover:bg-secondary/80 transition-colors border-l border-border"
+                  data-testid="button-copy-command"
+                >
+                  {commandCopied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{commandCopied ? "Copied" : "Copy"}</span>
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Don't have ffmpeg installed?{" "}
+                <a
+                  href="https://ffmpeg.org/download.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary hover:underline"
+                >
+                  Get it here
+                </a>{" "}
+                — free and works on Mac, Windows, and Linux.
+              </p>
+            </div>
+
+            <Button variant="outline" onClick={reset} data-testid="button-too-large-reset">
+              Try Another File
+            </Button>
           </Card>
         )}
 
@@ -278,7 +530,7 @@ export default function Home() {
               <div className="flex-1 min-w-0">
                 <h3 className="font-medium text-white truncate">{file?.name}</h3>
                 <div className="text-sm text-muted-foreground font-mono mt-1">
-                  {formatTime(duration)} • {Math.ceil(duration / 30)} windows
+                  {formatTime(duration)} • {Math.ceil(duration / WINDOW_SECONDS)} windows
                 </div>
               </div>
               <Button variant="ghost" size="icon" onClick={reset} className="shrink-0" data-testid="button-cancel-ready">
@@ -293,17 +545,22 @@ export default function Home() {
 
         {/* SCANNING */}
         {step === STEP.SCANNING && (
-          <Card className="p-8 border-border bg-card">
-            <div className="flex justify-between items-end mb-4">
+          <Card className="p-8 border-border bg-card space-y-4">
+            <div className="flex justify-between items-end">
               <div>
                 <h3 className="font-medium text-white mb-1">Scanning for matches...</h3>
                 <p className="text-sm text-muted-foreground font-mono">
-                  Window {curWin} of {totalWin}
+                  {curWin} of {totalWin} windows · {results.length} match{results.length === 1 ? "" : "es"} so far
                 </p>
               </div>
               <span className="text-2xl font-light font-mono text-primary">{progress}%</span>
             </div>
             <Progress value={progress} className="h-2 bg-secondary" />
+            <div className="flex justify-end">
+              <Button variant="ghost" size="sm" onClick={cancelScan} data-testid="button-cancel-scan">
+                <X className="w-4 h-4 mr-1.5" /> Cancel scan
+              </Button>
+            </div>
           </Card>
         )}
 
@@ -335,6 +592,20 @@ export default function Home() {
               </p>
             </Card>
 
+            {scanWarnings.length > 0 && (
+              <Card className="p-4 border-yellow-500/30 bg-yellow-500/5 text-sm flex gap-3">
+                <AlertCircle className="w-5 h-5 shrink-0 text-yellow-500" />
+                <div>
+                  <p className="font-semibold text-yellow-500">
+                    {scanWarnings.length} window{scanWarnings.length === 1 ? "" : "s"} could not be scanned
+                  </p>
+                  <p className="opacity-80 mt-1">
+                    Other windows completed. Re-scan if you want full coverage.
+                  </p>
+                </div>
+              </Card>
+            )}
+
             {/* Matched Sections */}
             {results.length > 0 && (
               <div className="space-y-3">
@@ -352,9 +623,11 @@ export default function Home() {
                       <Badge variant="outline" className="font-mono bg-red-500/10 text-red-500 border-red-500/20">
                         {formatTime(r.offsetSeconds)} - {formatTime(r.offsetSeconds + r.durationSeconds)}
                       </Badge>
-                      <span className="text-xs text-muted-foreground font-mono">
-                        Score: {r.score}%
-                      </span>
+                      {typeof r.score === "number" && (
+                        <span className="text-xs text-muted-foreground font-mono">
+                          Score: {r.score}%
+                        </span>
+                      )}
                     </div>
                   </Card>
                 ))}

@@ -17,14 +17,19 @@ localPort = 25938
 [services.development]
 run = "pnpm --filter @workspace/clipcleaner run dev"
 
-[services.production]
-build = [ "pnpm", "--filter", "@workspace/clipcleaner", "run", "build" ]
-publicDir = "artifacts/clipcleaner/dist/public"
-serve = "static"
+# Serve via a small Node static server (server.mjs) so we can send
+# Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy headers.
+# Replit's static serving doesn't expose response-header configuration,
+# and those headers are required for the in-browser audio extractor
+# (SharedArrayBuffer / ffmpeg.wasm) to activate in production.
+[services.production.build]
+args = ["pnpm", "--filter", "@workspace/clipcleaner", "run", "build"]
 
-[[services.production.rewrites]]
-from = "/*"
-to = "/index.html"
+[services.production.run]
+args = ["node", "artifacts/clipcleaner/server.mjs"]
+
+[services.production.run.env]
+NODE_ENV = "production"
 
 [services.env]
 PORT = "25938"

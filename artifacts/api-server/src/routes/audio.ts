@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
-import express, { Router, type IRouter } from "express";
+import express, { Router, type IRouter, type RequestHandler } from "express";
 
 const router: IRouter = Router();
 const maxUploadBytes = 500 * 1024 * 1024;
@@ -20,6 +20,36 @@ const allowedExtensions = new Set([
   ".ogg",
 ]);
 
+// Simple in-memory rate limiter for /audio/extract. The route is expensive
+// (large upload + ffmpeg + tmp-disk), and the new client also retries on
+// failure, so per-IP limits keep one bad client from monopolizing the box.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_REQUESTS = 6;
+const rateBuckets = new Map<string, number[]>();
+
+const rateLimit: RequestHandler = (req, res, next) => {
+  const key = req.ip ?? "unknown";
+  const now = Date.now();
+  const cutoff = now - RATE_WINDOW_MS;
+
+  // Lazy cleanup: drop expired entries on each check; bound map by key cardinality.
+  const timestamps = (rateBuckets.get(key) ?? []).filter((t) => t > cutoff);
+
+  if (timestamps.length >= RATE_MAX_REQUESTS) {
+    const retryAfterSec = Math.max(1, Math.ceil((timestamps[0] + RATE_WINDOW_MS - now) / 1000));
+    res.set("retry-after", String(retryAfterSec));
+    res.status(429).json({
+      error: "Too many requests",
+      details: `Limit is ${RATE_MAX_REQUESTS} extractions per minute. Try again in ${retryAfterSec}s.`,
+    });
+    return;
+  }
+
+  timestamps.push(now);
+  rateBuckets.set(key, timestamps);
+  next();
+};
+
 function getSafeExtension(fileName: string | undefined) {
   const extension = extname(fileName ?? "").toLowerCase();
   return allowedExtensions.has(extension) ? extension : ".bin";
@@ -27,6 +57,7 @@ function getSafeExtension(fileName: string | undefined) {
 
 router.post(
   "/audio/extract",
+  rateLimit,
   express.raw({
     type: ["application/octet-stream", "audio/*", "video/*"],
     limit: maxUploadBytes,
